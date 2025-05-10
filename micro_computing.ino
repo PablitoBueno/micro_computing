@@ -1,9 +1,9 @@
-// MicroComputing - Otimizado com controle direto do LCD e teclado
+```cpp
 #include <avr/io.h>
 #include <util/delay.h>
 #include <string.h>
+#include <avr/pgmspace.h>
 
-// === Configurações de LCD (modo 4 bits via PORTC e PD2) ===
 #define LCD_RS PC1
 #define LCD_RW PC0
 #define LCD_E  PD2
@@ -12,15 +12,13 @@
 #define LCD_D6 PC4
 #define LCD_D7 PC5
 
-// === Teclado matricial ===
 const uint8_t rowPins[4] = {7, 8, 9, 10};
 const uint8_t colPins[4] = {3, 4, 5, 6};
 
-// === Constantes e definições ===
 #define MAX_FILES 5
-#define MAX_FILENAME 10
+#define MAX_FILENAME 12
 #define MAX_CONTENT 128
-#define MULTITAP_TIMEOUT 1000
+#define MULTITAP_TIMEOUT 800
 
 struct File {
   char name[MAX_FILENAME];
@@ -31,33 +29,32 @@ struct File {
 File files[MAX_FILES];
 uint8_t fileCount = 0;
 
-enum State { MENU, NOTEBOOK, SAVE_NAME, HISTORY, READ_FILE };
+enum State { MENU, NOTEBOOK, SAVE_NAME, HISTORY };
 State state = MENU;
 
 char buffer[MAX_CONTENT] = "";
 uint8_t bufferLen = 0;
 uint8_t cursorPos = 0;
-uint8_t contentOffset = 0;
 
 char filenameInput[MAX_FILENAME] = "";
 uint8_t filenameLen = 0;
 
-uint8_t menuIndex = 0;
 uint8_t fileIndex = 0;
 
-const char* multitapMap[] = {
-  " ",    ".,1",  "ABC2", "DEF3",
-  "GHI4", "JKL5", "MNO6", "PQRS7",
-  "TUV8", "WXYZ9"
+const char* const multitapMap[] PROGMEM = {
+    " 0", ".,1", "ABC2", "DEF3", "GHI4", 
+    "JKL5", "MNO6", "PQRS7", "TUV8", "WXYZ9"
 };
 
-char lastKey = 0;
-uint8_t tapIndex = 0;
-unsigned long lastTapTime = 0;
+struct {
+    uint8_t lastKey;
+    uint8_t tapIndex;
+    uint32_t lastTapTime;
+    bool inMultitap;
+} inputState;
 
-// === Funções de LCD direto ===
 void lcdSendNibble(uint8_t nibble) {
-  PORTC = (PORTC & 0xC3) | (nibble << 2); // bits PC2-PC5
+  PORTC = (PORTC & 0xC3) | (nibble << 2);
   PORTD |= (1 << LCD_E);
   _delay_us(1);
   PORTD &= ~(1 << LCD_E);
@@ -106,146 +103,234 @@ void lcdPrint(const char* str) {
   while (*str) lcdData(*str++);
 }
 
-// === Teclado ===
+void lcdPrint_P(const char* str) {
+    char c;
+    while ((c = pgm_read_byte(str++))) {
+        lcdData(c);
+    }
+}
+
 void keypadInit() {
-  for (uint8_t i = 0; i < 4; i++) {
-    pinMode(rowPins[i], OUTPUT);
-    digitalWrite(rowPins[i], HIGH);
-  }
-  for (uint8_t i = 0; i < 4; i++) {
-    pinMode(colPins[i], INPUT_PULLUP);
-  }
+    for(uint8_t i=0; i<4; i++){
+        pinMode(rowPins[i], OUTPUT);
+        digitalWrite(rowPins[i], HIGH);
+    }
+    for(uint8_t i=0; i<4; i++){
+        pinMode(colPins[i], INPUT_PULLUP);
+    }
 }
 
 int getKey() {
-  for (uint8_t r = 0; r < 4; r++) {
-    digitalWrite(rowPins[r], LOW);
-    for (uint8_t c = 0; c < 4; c++) {
-      if (!digitalRead(colPins[c])) {
-        delay(150);
-        while (!digitalRead(colPins[c]));
+    for(uint8_t r=0; r<4; r++){
+        digitalWrite(rowPins[r], LOW);
+        for(uint8_t c=0; c<4; c++){
+            if(!digitalRead(colPins[c])){
+                _delay_ms(50);
+                while(!digitalRead(colPins[c]));
+                digitalWrite(rowPins[r], HIGH);
+                return r*4 + c;
+            }
+        }
         digitalWrite(rowPins[r], HIGH);
-        return r * 4 + c;
-      }
     }
-    digitalWrite(rowPins[r], HIGH);
-  }
-  return -1;
-}
-
-// === Utilitários ===
-void insertChar(char ch) {
-  if (bufferLen < MAX_CONTENT) {
-    for (int i = bufferLen; i > cursorPos; i--)
-      buffer[i] = buffer[i-1];
-    buffer[cursorPos] = ch;
-    bufferLen++;
-    cursorPos++;
-  }
+    return -1;
 }
 
 void deleteChar() {
-  if (cursorPos > 0 && bufferLen > 0) {
-    for (int i = cursorPos - 1; i < bufferLen; i++)
-      buffer[i] = buffer[i + 1];
+    if(bufferLen == 0 || cursorPos == 0) return;
+    
+    for(uint8_t i=cursorPos-1; i<bufferLen; i++){
+        buffer[i] = buffer[i+1];
+    }
+    
     bufferLen--;
     cursorPos--;
-  }
+    buffer[bufferLen] = '\0';
+}
+
+void saveFile() {
+    if(fileCount < MAX_FILES){
+        strcpy(files[fileCount].name, filenameInput);
+        strcpy(files[fileCount].content, buffer);
+        files[fileCount].length = bufferLen;
+        fileCount++;
+    }
+}
+
+void deleteCurrentFile() {
+    if(fileCount == 0) return;
+    
+    for(uint8_t i=fileIndex; i<fileCount-1; i++){
+        files[i] = files[i+1];
+    }
+    fileCount--;
+    if(fileIndex >= fileCount) fileIndex = fileCount-1;
 }
 
 void updateDisplay() {
-  lcdClear();
-  lcdSetCursor(0,0);
-  switch(state) {
-    case MENU:
-      lcdPrint("- MicroComputing");
-      lcdSetCursor(0,1);
-      if (menuIndex == 0) lcdPrint(">Notebook");
-      else lcdPrint(">History");
-      break;
-    case NOTEBOOK:
-    case READ_FILE:
-      for (int i = 0; i < 16; i++) {
-        char ch = (contentOffset + i < bufferLen) ? buffer[contentOffset + i] : ' ';
-        lcdData(ch);
-      }
-      lcdSetCursor(cursorPos - contentOffset, 1);
-      lcdData('^');
-      break;
-    case SAVE_NAME:
-      lcdPrint("Name:");
-      lcdSetCursor(0,1);
-      lcdPrint(filenameInput);
-      break;
-    case HISTORY:
-      if (fileCount == 0) lcdPrint("No files.");
-      else {
-        lcdSetCursor(0,0); lcdPrint("Files:");
-        lcdSetCursor(0,1); lcdPrint(files[fileIndex].name);
-      }
-      break;
-  }
+    lcdClear();
+    lcdSetCursor(0,0);
+    
+    switch(state){
+        case MENU:
+            lcdPrint_P(PSTR("-MicroComputing-"));
+            lcdSetCursor(0,1);
+            lcdPrint_P(PSTR("1.Editar 2.Historico"));
+            break;
+            
+        case NOTEBOOK:
+            for(uint8_t i=0; i<16; i++){
+                lcdData((i < bufferLen) ? buffer[i] : ' ');
+            }
+            lcdSetCursor(0,1);
+            for(uint8_t i=0; i<16; i++){
+                lcdData((i == cursorPos) ? '^' : ' ');
+            }
+            break;
+            
+        case SAVE_NAME:
+            lcdPrint_P(PSTR("-MicroComputing-"));
+            lcdSetCursor(0,1);
+            lcdPrint("Nome:");
+            lcdPrint(filenameInput);
+            break;
+            
+        case HISTORY:
+            lcdPrint_P(PSTR("-MicroComputing-"));
+            lcdSetCursor(0,1);
+            if(fileCount == 0){
+                lcdPrint_P(PSTR("Sem arquivos"));
+            } else {
+                lcdPrint(files[fileIndex].name);
+                lcdPrint(" ");
+                lcdPrint((char)('0'+fileIndex+1));
+                lcdPrint("/");
+                lcdPrint((char)('0'+fileCount));
+            }
+            break;
+    }
 }
 
-// === Setup e Loop ===
 void setup() {
-  lcdInit();
-  keypadInit();
-  updateDisplay();
+    lcdInit();
+    keypadInit();
+    updateDisplay();
 }
 
 void loop() {
-  int key = getKey();
-  unsigned long now = millis();
-  if (state == MENU) {
-    if (key == 12) menuIndex = 0;
-    if (key == 13) menuIndex = 1;
-    if (key == 15) {
-      if (menuIndex == 0) {
-        state = NOTEBOOK; bufferLen = 0; cursorPos = 0; contentOffset = 0;
-      } else {
-        state = HISTORY; fileIndex = 0;
-      }
+    int key = getKey();
+    uint32_t now = millis();
+    
+    if(key != -1){
+        switch(state){
+            case MENU:
+                if(key == 0){
+                    buffer[0] = '\0';
+                    bufferLen = 0;
+                    cursorPos = 0;
+                    state = NOTEBOOK;
+                }
+                else if(key == 1){
+                    fileIndex = 0;
+                    state = HISTORY;
+                }
+                break;
+                
+            case NOTEBOOK:
+                if(key == 14){
+                    state = SAVE_NAME;
+                    filenameInput[0] = '\0';
+                    filenameLen = 0;
+                }
+                else if(key == 15){
+                    deleteChar();
+                }
+                else if(key >= 2 && key <= 11){
+                    if(key-2 != inputState.lastKey || now - inputState.lastTapTime > MULTITAP_TIMEOUT){
+                        inputState.lastKey = key-2;
+                        inputState.tapIndex = 0;
+                    } else {
+                        inputState.tapIndex++;
+                    }
+                    
+                    const char* map = (const char*)pgm_read_ptr(&multitapMap[key-2]);
+                    uint8_t len = strlen_P(map);
+                    if(len > 0){
+                        inputState.tapIndex %= len;
+                        char c = pgm_read_byte(&map[inputState.tapIndex]);
+                        
+                        if(bufferLen < MAX_CONTENT-1){
+                            for(uint8_t i=bufferLen; i>cursorPos; i--){
+                                buffer[i] = buffer[i-1];
+                            }
+                            buffer[cursorPos] = c;
+                            bufferLen++;
+                            cursorPos++;
+                            buffer[bufferLen] = '\0';
+                        }
+                    }
+                    inputState.lastTapTime = now;
+                }
+                else if(key == 4){
+                    if(cursorPos > 0) cursorPos--;
+                }
+                else if(key == 6){
+                    if(cursorPos < bufferLen) cursorPos++;
+                }
+                break;
+                
+            case SAVE_NAME:
+                if(key == 14){
+                    state = NOTEBOOK;
+                }
+                else if(key == 15){
+                    saveFile();
+                    state = MENU;
+                }
+                else if(key == 4){
+                    if(filenameLen > 0) filenameInput[--filenameLen] = '\0';
+                }
+                else if(key >= 2 && key <= 11){
+                    if(key-2 != inputState.lastKey || now - inputState.lastTapTime > MULTITAP_TIMEOUT){
+                        inputState.lastKey = key-2;
+                        inputState.tapIndex = 0;
+                    } else {
+                        inputState.tapIndex++;
+                    }
+                    
+                    const char* map = (const char*)pgm_read_ptr(&multitapMap[key-2]);
+                    uint8_t len = strlen_P(map);
+                    if(len > 0 && filenameLen < MAX_FILENAME-1){
+                        inputState.tapIndex %= len;
+                        filenameInput[filenameLen++] = pgm_read_byte(&map[inputState.tapIndex]);
+                        filenameInput[filenameLen] = '\0';
+                    }
+                    inputState.lastTapTime = now;
+                }
+                break;
+                
+            case HISTORY:
+                if(key == 4){
+                    if(fileIndex > 0) fileIndex--;
+                }
+                else if(key == 6){
+                    if(fileIndex < fileCount-1) fileIndex++;
+                }
+                else if(key == 0){
+                    strcpy(buffer, files[fileIndex].content);
+                    bufferLen = files[fileIndex].length;
+                    cursorPos = 0;
+                    state = NOTEBOOK;
+                }
+                else if(key == 1){
+                    state = MENU;
+                }
+                else if(key == 14){
+                    deleteCurrentFile();
+                }
+                break;
+        }
+        updateDisplay();
     }
-  } else if (state == NOTEBOOK) {
-    if (key >= 0 && key <= 9) {
-      if (key == lastKey && (now - lastTapTime < MULTITAP_TIMEOUT)) {
-        tapIndex = (tapIndex + 1) % strlen(multitapMap[key]);
-      } else {
-        tapIndex = 0;
-      }
-      insertChar(multitapMap[key][tapIndex]);
-      lastKey = key;
-      lastTapTime = now;
-    } else if (key == 12 && cursorPos > 0) cursorPos--;
-    else if (key == 13 && cursorPos < bufferLen) cursorPos++;
-    else if (key == 14) deleteChar();
-    else if (key == 15) { state = SAVE_NAME; filenameLen = 0; filenameInput[0] = 0; }
-  } else if (state == SAVE_NAME) {
-    if (key >= 0 && key <= 9 && filenameLen < MAX_FILENAME - 1) {
-      filenameInput[filenameLen++] = '0' + key;
-      filenameInput[filenameLen] = 0;
-    } else if (key == 15 && fileCount < MAX_FILES) {
-      strcpy(files[fileCount].name, filenameInput);
-      strcpy(files[fileCount].content, buffer);
-      files[fileCount].length = bufferLen;
-      fileCount++;
-      state = MENU;
-    }
-  } else if (state == HISTORY) {
-    if (key == 12 && fileIndex > 0) fileIndex--;
-    if (key == 13 && fileIndex < fileCount - 1) fileIndex++;
-    if (key == 15 && fileCount > 0) {
-      strcpy(buffer, files[fileIndex].content);
-      bufferLen = files[fileIndex].length;
-      cursorPos = 0;
-      contentOffset = 0;
-      state = READ_FILE;
-    }
-  } else if (state == READ_FILE) {
-    if (key == 12 && cursorPos >= 16) cursorPos -= 16;
-    if (key == 13 && cursorPos + 16 < bufferLen) cursorPos += 16;
-    if (key == 15) state = MENU;
-  }
-  updateDisplay();
 }
+```
