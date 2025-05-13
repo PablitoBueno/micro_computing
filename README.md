@@ -1,1 +1,1 @@
-# micro_computing
+# micro_notebook
