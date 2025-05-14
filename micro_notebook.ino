@@ -175,10 +175,10 @@ int main(void){
             }
         }
 
-        // atualiza blinkTimer e pisca a ~400ms
+        // atualiza blinkTimer e pisca a ~250ms
         _delay_ms(10);
         blinkTimer += 10;
-        if(blinkTimer >= 400){
+        if(blinkTimer >= 150){
             blinkTimer = 0;
             blinkState ^= 1;
         }
